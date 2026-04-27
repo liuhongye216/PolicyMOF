@@ -1,0 +1,85 @@
+# ============================================================
+# LAMMPS 输入模板: MOF 几何优化 (UFF 力场)
+# 流程: 软势预松弛 → 全势最小化 → 晶胞+原子联合优化 → 精修
+# ============================================================
+
+# -------------------- 初始化 --------------------
+units           real
+atom_style      charge
+boundary        p p p
+
+# -------------------- 读取结构 --------------------
+read_data       __DATA_FILE__
+
+# -------------------- 原子质量 --------------------
+__MASS_LINES__
+
+# -------------------- 力场设置 (临时短截断用于 Stage 1) --------------------
+pair_style      lj/cut 5.0
+pair_modify     mix arithmetic
+__PAIR_COEFF_LINES__
+
+# QEq 电荷均衡 (每 1 步更新一次)
+fix             qeq all qeq/point 1 10.0 1.0e-6 100 param.qeq
+
+# -------------------- 输出设置 --------------------
+thermo          100
+thermo_style    custom step pe ke etotal press vol lx ly lz
+
+# -------------------- 保存初始结构 --------------------
+dump            init all custom 1 __STRUCTURE_NAME___initial.dump id type x y z
+run             0
+undump          init
+
+# ============================================================
+# Stage 1: 软势预松弛 — 短截断纯LJ + SD 消除严重原子重叠
+# ============================================================
+min_style       sd
+minimize        1.0e-2 1.0e-3 1000 10000
+
+# ============================================================
+# 恢复完整力场 (LJ + Coulomb + PPPM)
+# ============================================================
+pair_style      lj/cut/coul/long 12.5
+pair_modify     mix arithmetic
+pair_modify     tail yes
+__PAIR_COEFF_LINES__
+kspace_style    pppm 1.0e-5
+kspace_modify   gewald 0.3
+
+# ============================================================
+# Stage 2: 仅原子坐标 CG 最小化 (固定晶胞)
+# ============================================================
+min_style       cg
+minimize        1.0e-4 1.0e-6 10000 100000
+
+# ============================================================
+# Stage 3: 晶胞 + 原子坐标联合最小化 (box/relax)
+# ============================================================
+fix             boxrelax all box/relax tri 0.0 vmax 0.001
+min_style       cg
+minimize        1.0e-6 1.0e-8 10000 100000
+unfix           boxrelax
+
+# ============================================================
+# Stage 4: 最终精细最小化 (固定优化后晶胞)
+# ============================================================
+min_style       cg
+minimize        1.0e-8 1.0e-10 10000 100000
+
+# -------------------- 保存优化后结构 --------------------
+dump            final all custom 1 __STRUCTURE_NAME___relaxed.dump id type x y z
+run             0
+undump          final
+
+write_data      __STRUCTURE_NAME___relaxed.data
+write_dump      all xyz __STRUCTURE_NAME___relaxed.xyz modify sort id
+
+# -------------------- 输出最终信息 --------------------
+variable        final_pe equal pe
+variable        final_vol equal vol
+variable        final_press equal press
+print           "FINAL_PE = ${final_pe}"
+print           "FINAL_VOL = ${final_vol}"
+print           "FINAL_PRESS = ${final_press}"
+print           "OPTIMIZATION_COMPLETE"
