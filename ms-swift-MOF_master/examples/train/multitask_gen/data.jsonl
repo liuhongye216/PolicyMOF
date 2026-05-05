@@ -1,0 +1,10 @@
+{"messages": [{"role": "user", "content": "Translate the following English sentence to Chinese: The weather is nice today."}, {"role": "assistant", "content": "今天天气真好。"}], "task": "gen"}
+{"messages": [{"role": "user", "content": "Write a short poem about spring."}, {"role": "assistant", "content": "Spring breeze gently blows,\nFlowers bloom in vibrant rows,\nNature's beauty shows."}], "task": "gen"}
+{"messages": [{"role": "user", "content": "Explain what photosynthesis is in one sentence."}, {"role": "assistant", "content": "Photosynthesis is the process by which green plants convert sunlight, water, and carbon dioxide into glucose and oxygen."}], "task": "gen"}
+{"messages": [{"role": "user", "content": "Classify the sentiment of the following review: I absolutely love this product! It exceeded all my expectations."}], "label": 2, "task": "cls"}
+{"messages": [{"role": "user", "content": "Classify the sentiment of the following review: The service was terrible and the food was cold."}], "label": 0, "task": "cls"}
+{"messages": [{"role": "user", "content": "Classify the sentiment of the following review: It was okay, nothing special but not bad either."}], "label": 1, "task": "cls"}
+{"messages": [{"role": "user", "content": "Rate the quality of this text on a scale from 0 to 1: The mitochondria is the powerhouse of the cell, converting nutrients into ATP through oxidative phosphorylation."}], "label": 0.92, "task": "reg"}
+{"messages": [{"role": "user", "content": "Rate the quality of this text on a scale from 0 to 1: me go store buy thing good yes."}], "label": 0.15, "task": "reg"}
+{"messages": [{"role": "user", "content": "Rate the quality of this text on a scale from 0 to 1: The report provides a reasonable overview but lacks detailed analysis."}], "label": 0.58, "task": "reg"}
+{"messages": [{"role": "user", "content": "Summarize the key idea: Machine learning is a subset of artificial intelligence that enables systems to learn from data."}, {"role": "assistant", "content": "ML lets systems learn from data automatically."}], "task": "gen"}
