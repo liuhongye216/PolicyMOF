@@ -3,7 +3,7 @@
 <div align='center'>
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Data: Zenodo](https://img.shields.io/badge/Data-Zenodo-blue.svg)](https://doi.org/10.5281/zenodo.19809194)
+[![Data and Models: Zenodo](https://img.shields.io/badge/Data%20and%20Models-Zenodo-blue.svg)](https://doi.org/10.5281/zenodo.20742424)
 
 </div>
 
@@ -68,7 +68,7 @@ The full workflow requires Python packages and external scientific software:
 - Zeo++
 - MOFid and TOBACCO-related reconstruction utilities
 
-Model paths, dataset paths, and external executable paths should be configured for the local machine before running the training or simulation scripts. Large model checkpoints are not included in this repository.
+Model paths, dataset paths, and external executable paths should be configured for the local machine before running the training or simulation scripts. Large model checkpoints and `.pt` files are not included in this GitHub repository and are released through Zenodo.
 
 ### Example Workflow
 
@@ -113,13 +113,13 @@ See `simulation/README.md` for more details.
 
 ## Datasets
 
-The released dataset is available on Zenodo:
+The released dataset and model files are available on Zenodo:
 
 ```text
-https://doi.org/10.5281/zenodo.19809194
+https://doi.org/10.5281/zenodo.20742424
 ```
 
-It includes processed MOF data used by this project, including training/test data and generated output data. Raw structures derived from public databases should be accessed through the original database sources cited in the manuscript.
+It includes processed MOF data used by this project, including training/test data, generated output data, and large model-related files that are not stored in GitHub. Raw structures derived from public databases should be accessed through the original database sources cited in the manuscript.
 
 Small example files are also included in this repository to document the expected input formats:
 
@@ -143,10 +143,10 @@ This repo contains the following main components:
 - `reward/` - Composite reward plugin and node/linker reference files for MOF generation.
 - `simulation/` - LAMMPS, Zeo++, and GCMC validation workflow for generated CIF structures.
 - `visualization/` - Attention-analysis scripts for model interpretation.
-- `lora_example/` - Example training curves from LoRA/GRPO runs.
+- `lora_example/` - Lightweight LoRA/GRPO examples and training curves. Large checkpoint files, `.pt` weights, and other generated model artifacts are not stored in GitHub; they are available from the Zenodo release above.
 - `ms-swift-MOF_master/` - Modified ms-swift/SWIFT training framework used for MOF sequence modelling.
 
-Large checkpoints, generated CIF collections, and full simulation outputs should be stored outside normal Git history or released through Zenodo, Hugging Face, Git LFS, or another data repository.
+Large checkpoints, `.pt` files, generated CIF collections, and full simulation outputs are intentionally kept outside normal Git history. The released large files for this project are available from the Zenodo record linked above.
 
 If you find any bugs or have questions, please open an issue in this repository.
 
