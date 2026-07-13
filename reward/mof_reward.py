@@ -15,25 +15,41 @@ import shutil
 from pathlib import Path
 from rdkit.Chem.rdFingerprintGenerator import GetMorganGenerator
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-GRPO_ROOT = REPO_ROOT / "GRPO"
-if str(GRPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(GRPO_ROOT))
+ROOT = Path(os.environ.get(
+    "MOF_PROJECT_ROOT",
+    "/home/liuhongye/material_LLM/material_LLM_experiment/post-pronew"
+))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-TOBACCO_WORKDIR = Path(os.environ.get("MOF_TOBACCO_WORKDIR", REPO_ROOT / "tobacco_workdir"))
-edges_dir = Path(os.environ.get("MOF_TOBACCO_EDGES_DIR", TOBACCO_WORKDIR / "edges"))
-output_cifs_dir = Path(os.environ.get("MOF_TOBACCO_OUTPUT_CIFS_DIR", TOBACCO_WORKDIR / "output_cifs"))
+edges_dir = Path(os.environ.get(
+    "MOF_TOBACCO_EDGES_DIR",
+    str(ROOT / "tobacco_V3" / "edges")
+))
+output_cifs_dir = Path(os.environ.get(
+    "MOF_TOBACCO_OUTPUT_CIFS_DIR",
+    str(ROOT / "tobacco_V3" / "output_cifs")
+))
 
 N2_MODEL_PATH = os.environ.get("MOF_N2_MODEL", "")
 CO2_MODEL_PATH = os.environ.get("MOF_CO2_MODEL", "")
 DEFAULT_ADSORPTION_MODEL = os.environ.get("MOF_ADSORPTION_MODEL", CO2_MODEL_PATH)
 
-# Import project utilities after adding GRPO_ROOT to sys.path.
+# Import project utilities after adding ROOT to sys.path.
 from utils.enhanced_cif_screener import run_evaluate
 from utils.tobacco import run_tobacco_with_edge_folders
 from utils.mof_processing import process_mof_smiles
 
 logger = logging.getLogger(__name__)
+
+
+class StructuredReward(float):
+    """Float-compatible reward carrying component metadata for SR-GRPO."""
+
+    def __new__(cls, value, metadata=None):
+        obj = float.__new__(cls, value)
+        obj.reward_metadata = metadata or {}
+        return obj
 
 # -------------------------
 # 推断相关 imports 延迟在函数内部导入（避免模块导入时要求 heavy deps）
@@ -57,9 +73,18 @@ class MOFRewardORM(ORM):
         - adsorption_weight1/weight2: 两个指标的权重（默认各0.5）
         - recent_maxlen: 最近 prefix 缓存的最大长度
         """
-        TOKENS_PATH = os.environ.get("MOF_TOKENS_PATH", str(REPO_ROOT / "reward" / "mof_id_tokens.csv"))
-        MOFID_PATH = os.environ.get("MOF_MOFID_PATH", str(REPO_ROOT / "reward" / "mof_id.csv"))
-        NODES_CSV = os.environ.get("MOF_NODES_CSV", str(REPO_ROOT / "reward" / "nodes_linkers_fromfolder.csv"))
+        TOKENS_PATH = os.environ.get(
+            "MOF_TOKENS_PATH",
+            "/home/liuhongye/material_LLM/material_LLM_experiment/LLM_input/nodes_linkers/mof_id_tokens.csv"
+        )
+        MOFID_PATH = os.environ.get(
+            "MOF_MOFID_PATH",
+            "/home/liuhongye/material_LLM/material_LLM_experiment/LLM_input/nodes_linkers/mof_id.csv"
+        )
+        NODES_CSV = os.environ.get(
+            "MOF_NODES_CSV",
+            "/home/liuhongye/material_LLM/material_LLM_experiment/LLM_input/nodes_linkers/nodes_linkers_fromfolder.csv"
+        )
 
         # 常见金属原子符号集合
         self.METAL_SYMBOLS = {
@@ -70,18 +95,20 @@ class MOFRewardORM(ORM):
 
         # 默认权重（总和为 1.0），可在外部覆盖
         self.DEFAULT_WEIGHTS = {
-            "chemical_validity": 0.07,
-            "metal_presence": 0.09,
-            "functional_group": 0.03,
-            "has_ring": 0.03,
-            "similarity": 0.16,
+            "chemical_validity": 0.05,
+            "metal_presence": 0.06,
+            "functional_group": 0.02,
+            "has_ring": 0.02,
+            "similarity": 0.08,
             "porosity_proxy": 0.02,
-            "novelty": 0.11,
-            "adsorption": 0.11,
-            "structure_3d": 0.12,
-            "cif_generation": 0.26
+            "novelty": 0.05,
+            "adsorption": 0.18,
+            "structure_3d": 0.17,
+            "cif_generation": 0.35
         }
         self.weights = weights or self.DEFAULT_WEIGHTS
+        self.cif_failure_cap = float(os.environ.get("MOF_CIF_FAILURE_CAP", "0.30"))
+        self.cif_gate_threshold = float(os.environ.get("MOF_CIF_GATE_THRESHOLD", "0.05"))
 
         # 注入或延后创建的引擎
         self._adsorption_engine = adsorption_engine
@@ -640,7 +667,6 @@ class MOFRewardORM(ORM):
         """
         使用高斯CDF对两个指标评分
         """
-
         try:
             from scipy.stats import norm
             
@@ -675,8 +701,8 @@ class MOFRewardORM(ORM):
                 mu1 = 0.2875
                 sigma1 = 0.1490
                 score1 = float(norm.cdf(val1, loc=mu1, scale=sigma1))
-                score1 = max(0.0, min(1.0, score1))
-            
+                score1 = max(0.0, min(1.0, 1 - score1))
+
             # ========== 第二个指标 ==========
             score2 = 0.0
             val2 = None
@@ -1039,11 +1065,11 @@ class MOFRewardORM(ORM):
             sim   = self._similarity_score(prefix)
             poro  = self._porosity_proxy(prefix)
             novel = self._novelty_score(prefix)
-            ads   = self._adsorption_score(pred)
+            ads   = self._adsorption_score(pred) if self.weights.get("adsorption", 0.0) > 0.0 else 0.0
             struct3d = self._structure_3d_score(prefix)
             cif   = self._cif_generation_score(pred)
 
-            total = (
+            raw_total = (
                 self.weights["chemical_validity"] * chem +
                 self.weights["metal_presence"] * metal +
                 self.weights["functional_group"] * func +
@@ -1055,7 +1081,41 @@ class MOFRewardORM(ORM):
                 self.weights["structure_3d"] * struct3d +
                 self.weights["cif_generation"] * cif
             )
-            rewards.append(float(max(0.0, min(1.0, total))))
+            total = float(max(0.0, min(1.0, raw_total)))
+            if cif <= self.cif_gate_threshold:
+                total = min(total, self.cif_failure_cap)
+
+            components = {
+                "chemical_validity": float(chem),
+                "metal_presence": float(metal),
+                "functional_group": float(func),
+                "has_ring": float(ring),
+                "similarity": float(sim),
+                "porosity_proxy": float(poro),
+                "novelty": float(novel),
+                "adsorption": float(ads),
+                "structure_3d": float(struct3d),
+                "cif_generation": float(cif),
+                "raw_total_before_cap": float(raw_total),
+                "cif_failure_cap": float(self.cif_failure_cap if cif <= self.cif_gate_threshold else 1.0),
+            }
+            stages = {
+                "validity": float(np.mean([chem, metal, func, ring])),
+                "novelty": float(np.mean([sim, novel, poro])),
+                "reconstruction": float(np.mean([struct3d, cif])),
+                "property": float(ads),
+            }
+            gates = {
+                "validity": float(stages["validity"] >= 0.5),
+                "reconstruction": float(stages["reconstruction"] >= 0.5),
+            }
+            metadata = {
+                "components": components,
+                "stages": stages,
+                "gates": gates,
+                "weights": dict(self.weights),
+            }
+            rewards.append(StructuredReward(total, metadata))
             print(f"MOFReward: pred='{pred}' => scores: chem={chem:.3f}, metal={metal:.3f}, func={func:.3f}, ring={ring:.3f}, sim={sim:.3f}, poro={poro:.3f}, novel={novel:.3f}, ads={ads:.3f}, struct3d={struct3d:.3f}, cif={cif:.3f} => total={total:.3f}")
         return rewards
     
@@ -1184,4 +1244,3 @@ def predict_adsorption_amount(pred: str,
                     temp_engine.close()
             except Exception:
                 pass
-

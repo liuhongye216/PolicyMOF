@@ -242,6 +242,11 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
         assert len(local_advantages) == len(inputs)
         for i, advantage in enumerate(local_advantages):
             inputs[i]['advantages'] = advantage
+        if self._last_structure_loss_weights is not None:
+            local_structure_loss_weights = get_even_process_data(self, self._last_structure_loss_weights)
+            assert len(local_structure_loss_weights) == len(inputs)
+            for i, loss_weight in enumerate(local_structure_loss_weights):
+                inputs[i]['structure_loss_weight'] = loss_weight
         # log metrics in inputs
         self._logs['advantages'].extend(total_advantages.tolist())
 
@@ -254,6 +259,8 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
             # Advantages are always [batch_size], will be broadcast to [batch_size, seq_len] in loss computation
             all_advantages = torch.stack([data['advantages'] for data in batch])
             batch_encoded['advantages'] = all_advantages
+            if all('structure_loss_weight' in data for data in batch):
+                batch_encoded['structure_loss_weight'] = torch.stack([data['structure_loss_weight'] for data in batch])
 
         with patch_profiling_context(self, 'log_metrics'):
             # --- logs (prompts + completions) ---
@@ -316,12 +323,16 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
         # gather rewards
         if not self.dynamic_num_samples:
             total_rewards_per_func = gather(local_rewards_per_func)
+            local_reward_metadata = [inp.get('_swift_reward_metadata', {}) for inp in inputs]
+            self._last_total_reward_metadata = gather_object(local_reward_metadata)
         else:
             # gather_object to avoid shape mismatch
             local_rewards_list = [row.tolist() for row in local_rewards_per_func]
             total_rewards_per_func = gather_object(local_rewards_list)
             total_rewards_per_func = torch.tensor(
                 total_rewards_per_func, dtype=torch.float32, device=self.accelerator.device)
+            local_reward_metadata = [inp.get('_swift_reward_metadata', {}) for inp in inputs]
+            self._last_total_reward_metadata = gather_object(local_reward_metadata)
 
         return total_rewards_per_func
 
@@ -349,7 +360,8 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 # Reward model (nn.Module)
                 if isinstance(reward_func, nn.Module):
                     output_reward_func = reward_model_plugin(inputs=reward_inputs, **reward_kwargs)
-                    output_reward_func = [reward if reward is not None else torch.nan for reward in output_reward_func]
+                    output_reward_func = self._record_reward_outputs(
+                        inputs, output_reward_func, reward_func_name, reward_func_index=i)
                     rewards_per_func[:, i] = torch.tensor(output_reward_func, dtype=torch.float32, device=device)
                 # Async reward function - skip here, will be executed in parallel later
                 elif i in async_indices_set:
@@ -357,7 +369,8 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 # Synchronous reward function
                 else:
                     output_reward_func = reward_func(completions, **reward_kwargs)
-                    output_reward_func = [reward if reward is not None else torch.nan for reward in output_reward_func]
+                    output_reward_func = self._record_reward_outputs(
+                        inputs, output_reward_func, reward_func_name, reward_func_index=i)
                     rewards_per_func[:, i] = torch.tensor(output_reward_func, dtype=torch.float32, device=device)
 
         # Execute async reward functions in parallel using asyncio.gather
@@ -379,6 +392,8 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
 
             async_results = asyncio.run_coroutine_threadsafe(_run_async_funcs(), self.async_reward_loop).result()
             for idx, output_reward_func in async_results:
+                output_reward_func = self._record_reward_outputs(
+                    inputs, output_reward_func, self.reward_func_names[idx], reward_func_index=idx)
                 rewards_per_func[:, idx] = torch.tensor(output_reward_func, dtype=torch.float32, device=device)
 
         # If all reward functions return None for a given row, issue a detailed warning
@@ -393,6 +408,221 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
                            'Please ensure that at least one reward function returns a valid reward.')
 
         return rewards_per_func
+
+    def _coerce_reward_output(self, output: Any) -> Tuple[float, Optional[Dict[str, Any]]]:
+        """Accept scalar rewards or structured rewards with component metadata."""
+        if output is None:
+            return torch.nan, None
+
+        if isinstance(output, torch.Tensor):
+            if output.numel() == 1:
+                return float(output.detach().float().item()), None
+            output = output.detach().cpu().tolist()
+
+        output_metadata = getattr(output, 'reward_metadata', None) or getattr(output, 'metadata', None)
+        if output_metadata is not None:
+            return float(output), output_metadata
+
+        if isinstance(output, (int, float, bool)):
+            return float(output), None
+
+        if isinstance(output, dict):
+            reward_value = None
+            for key in ['reward', 'total_reward', 'score', 'value']:
+                if key in output:
+                    reward_value = output[key]
+                    break
+            if reward_value is None:
+                reward_value = output.get('components', output.get('scores'))
+                if isinstance(reward_value, dict):
+                    numeric_values = [
+                        float(v) for v in reward_value.values() if isinstance(v, (int, float, bool))
+                    ]
+                    reward_value = sum(numeric_values) / len(numeric_values) if numeric_values else torch.nan
+            reward, _ = self._coerce_reward_output(reward_value)
+            metadata = {k: v for k, v in output.items() if k not in ['reward', 'total_reward', 'score', 'value']}
+            return reward, metadata
+
+        if isinstance(output, (list, tuple)) and output:
+            reward, _ = self._coerce_reward_output(output[0])
+            metadata = output[1] if len(output) > 1 and isinstance(output[1], dict) else None
+            return reward, metadata
+
+        try:
+            return float(output), None
+        except (TypeError, ValueError):
+            return torch.nan, None
+
+    def _record_reward_outputs(self, inputs: DataType, outputs: List[Any], reward_func_name: str,
+                               reward_func_index: int) -> List[float]:
+        rewards = []
+        for row, output in zip(inputs, outputs):
+            reward, metadata = self._coerce_reward_output(output)
+            rewards.append(reward)
+            if metadata:
+                metadata = dict(metadata)
+                metadata['reward'] = reward
+                metadata['reward_func_index'] = reward_func_index
+                row.setdefault('_swift_reward_metadata', {})[reward_func_name] = metadata
+        return [reward if reward is not None else torch.nan for reward in rewards]
+
+    def _flatten_reward_metadata(self, metadata: Dict[str, Any]) -> Dict[str, float]:
+        flat = {}
+
+        def visit(prefix: str, value: Any):
+            if isinstance(value, torch.Tensor):
+                if value.numel() == 1:
+                    flat[prefix] = float(value.detach().float().item())
+                return
+            if isinstance(value, (int, float, bool)):
+                flat[prefix] = float(value)
+            elif isinstance(value, dict):
+                for k, v in value.items():
+                    key = str(k).lower()
+                    visit(key if not prefix else f'{prefix}.{key}', v)
+
+        for reward_meta in metadata.values():
+            if isinstance(reward_meta, dict):
+                visit('', reward_meta)
+        return flat
+
+    def _build_structure_stage_tensor(self, reward_metadata: List[Dict[str, Any]],
+                                      rewards: torch.Tensor) -> Optional[Dict[str, torch.Tensor]]:
+        if not self.structure_aware_grpo:
+            return None
+        if not reward_metadata or not any(bool(meta) for meta in reward_metadata):
+            return None
+
+        stage_aliases = {
+            'validity': [
+                'validity', 'valid', 'mof_check', 'chemical_validity', 'chemical', 'metal_presence',
+                'metal', 'node_validity', 'functional_group', 'has_ring', 'ring'
+            ],
+            'reconstruction': [
+                'reconstruction', 'reconstructability', 'reconstruct', 'cif_generation', 'cif',
+                'mof_quality', 'bond_quality', 'structure_3d', 'structure', 'geometry'
+            ],
+            'relaxation': [
+                'relaxation', 'relax', 'lammps', 'lammps_relax', 'relax_success', 'volume_stability',
+                'energy_stability', 'post_relax_geometry', 'not_collapsed'
+            ],
+            'property': [
+                'property', 'target_property', 'target', 'adsorption', 'co2', 'n2', 'ch4',
+                'selectivity', 'co2_n2_selectivity', 'co2_ch4_selectivity'
+            ],
+            'novelty': ['novelty', 'similarity', 'diversity', 'porosity_proxy', 'scale'],
+        }
+
+        device = rewards.device
+        stage_values = {stage: [] for stage in stage_aliases}
+        stage_present = {stage: False for stage in stage_aliases}
+
+        for metadata in reward_metadata:
+            flat = self._flatten_reward_metadata(metadata or {})
+            for stage, aliases in stage_aliases.items():
+                values = []
+                for key, value in flat.items():
+                    key_tail = key.split('.')[-1]
+                    if key_tail in aliases or key in aliases:
+                        values.append(float(value))
+                if values:
+                    stage_present[stage] = True
+                    stage_values[stage].append(sum(values) / len(values))
+                else:
+                    stage_values[stage].append(float('nan'))
+
+        if not any(stage_present.values()):
+            return None
+
+        stage_tensors = {
+            stage: torch.tensor(values, dtype=torch.float32, device=device)
+            for stage, values in stage_values.items()
+        }
+
+        scalar_rewards = rewards.detach().float()
+        for stage, tensor in stage_tensors.items():
+            if not stage_present[stage]:
+                stage_tensors[stage] = torch.zeros_like(scalar_rewards)
+                continue
+            fallback = scalar_rewards.nan_to_num(0.0)
+            stage_tensors[stage] = torch.where(torch.isnan(tensor), fallback, tensor).clamp(0.0, 1.0)
+
+        return {'values': stage_tensors, 'present': stage_present}
+
+    def _groupwise_advantage(self, values: torch.Tensor, group_ids: List[Any]) -> torch.Tensor:
+        advantages = torch.zeros_like(values)
+        for group_id in dict.fromkeys(group_ids):
+            idxs = [idx for idx, gid in enumerate(group_ids) if gid == group_id]
+            if not idxs:
+                continue
+            idx_tensor = torch.tensor(idxs, device=values.device)
+            group_values = values[idx_tensor]
+            centered = group_values - group_values.mean()
+            if self.scale_rewards != 'none' and len(idxs) > 1:
+                centered = centered / (group_values.std().clamp(min=1e-4))
+            advantages[idx_tensor] = centered
+        return advantages
+
+    def _compute_structure_aware_advantages(self, rewards: torch.Tensor,
+                                            group_ids: List[Any]) -> Optional[torch.Tensor]:
+        stage_pack = self._build_structure_stage_tensor(getattr(self, '_last_total_reward_metadata', []), rewards)
+        self._last_structure_loss_weights = None
+        if stage_pack is None:
+            return None
+
+        values = stage_pack['values']
+        present = stage_pack['present']
+        weights = self.structure_stage_weights
+        threshold = self.structure_gate_threshold
+
+        validity_gate = (values['validity'] >= threshold).float() if present['validity'] else torch.ones_like(rewards)
+        reconstruction_gate = (
+            values['reconstruction'] >= threshold).float() if present['reconstruction'] else torch.ones_like(rewards)
+        relaxation_gate = (
+            values['relaxation'] >= threshold).float() if present['relaxation'] else torch.ones_like(rewards)
+
+        stage_advantages = {stage: self._groupwise_advantage(tensor, group_ids) for stage, tensor in values.items()}
+        advantages = (
+            weights['validity'] * stage_advantages['validity'] +
+            validity_gate * (
+                weights['reconstruction'] * stage_advantages['reconstruction'] +
+                weights['novelty'] * stage_advantages['novelty'] +
+                reconstruction_gate * (
+                    weights['relaxation'] * stage_advantages['relaxation'] +
+                    relaxation_gate * weights['property'] * stage_advantages['property']
+                )
+            )
+        )
+
+        feasibility = (validity_gate + reconstruction_gate + relaxation_gate) / 3.0
+        self._last_structure_loss_weights = (0.5 + feasibility).clamp(0.5, 1.5)
+
+        mode = 'train' if self.model.training else 'eval'
+        for stage, tensor in values.items():
+            if present[stage]:
+                self._metrics[mode][f'structure/{stage}/mean'].append(tensor.mean().item())
+        self._metrics[mode]['structure/feasibility_gate'].append(feasibility.mean().item())
+        return advantages
+
+    def _structure_group_feasible_mask(self, rewards: torch.Tensor, group_ids: List[Any]) -> Optional[torch.Tensor]:
+        stage_pack = self._build_structure_stage_tensor(getattr(self, '_last_total_reward_metadata', []), rewards)
+        if stage_pack is None:
+            return None
+        values = stage_pack['values']
+        present = stage_pack['present']
+        threshold = self.structure_gate_threshold
+
+        sample_feasible = torch.ones_like(rewards, dtype=torch.bool)
+        for stage in ['validity', 'reconstruction', 'relaxation']:
+            if present[stage]:
+                sample_feasible = sample_feasible & (values[stage] >= threshold)
+
+        group_feasible = torch.zeros_like(sample_feasible)
+        for group_id in dict.fromkeys(group_ids):
+            idxs = [idx for idx, gid in enumerate(group_ids) if gid == group_id]
+            idx_tensor = torch.tensor(idxs, device=rewards.device)
+            group_feasible[idx_tensor] = sample_feasible[idx_tensor].any()
+        return group_feasible
 
     def _compute_advantages(self, inputs: DataType, rewards_per_func: torch.Tensor,
                             batch_encoded_inputs: List[DataType]) -> torch.Tensor:
@@ -490,6 +720,13 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
             grouped_rewards = rewards.view(-1, num_generations)
             K = num_generations
 
+            group_ids = [idx // K for idx in range(rewards.shape[0])]
+            structure_advantages = self._compute_structure_aware_advantages(rewards, group_ids)
+            if structure_advantages is not None:
+                log_rewards_metrics(rewards=grouped_rewards, rewards_per_func_for_metrics=rewards_per_func)
+                log_rewards_all(rewards_per_func)
+                return structure_advantages
+
             # Compute group statistics
             group_rewards_mean = grouped_rewards.mean(dim=1)
 
@@ -564,6 +801,17 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
             request_ids = gather_object([inp['request_id'] for inp in inputs])
             assert rewards.shape[0] == len(prompt_ids) == len(request_ids)
             device = self.accelerator.device
+
+            structure_advantages = self._compute_structure_aware_advantages(rewards, prompt_ids)
+            if structure_advantages is not None:
+                # Keep the original scalar reward logs for compatibility with existing dashboards.
+                unique_indices_for_logs = self._get_last_indices(request_ids)
+                unique_rewards_for_logs = rewards[unique_indices_for_logs]
+                log_rewards_metrics(
+                    rewards=unique_rewards_for_logs,
+                    rewards_per_func_for_metrics=rewards_per_func[unique_indices_for_logs])
+                log_rewards_all(rewards_per_func)
+                return structure_advantages
 
             # Step 1. Deduplicate request_ids
             unique_indices = self._get_last_indices(request_ids)
@@ -682,6 +930,8 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
         resample_count = 0
         valid_samples = []
         valid_rewards_per_func = []
+        valid_reward_metadata = []
+        origin_reward_metadata = getattr(self, '_last_total_reward_metadata', [])
         origin_data = (inputs, rewards_per_func)
 
         while resample_count < self.max_resample_times:
@@ -689,6 +939,9 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
             valid_mask = (rewards_std > 0)
             all_inputs = gather_object(inputs)
             valid_samples.extend([inp for inp, mask in zip(all_inputs, valid_mask) if mask])
+            valid_reward_metadata.extend([
+                meta for meta, mask in zip(getattr(self, '_last_total_reward_metadata', []), valid_mask) if mask
+            ])
             valid_rewards_per_func.append(rewards_per_func[valid_mask])
             if len(valid_samples) >= self.args.generation_batch_size:
                 break
@@ -708,9 +961,11 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
             )
             inputs = valid_samples[:self.args.generation_batch_size][process_slice]
             rewards_per_func = torch.cat(valid_rewards_per_func)[:self.args.generation_batch_size]
+            self._last_total_reward_metadata = valid_reward_metadata[:self.args.generation_batch_size]
         else:
             logger.warning(f'There are still std=0 groups present after {self.max_resample_times} retries.')
             inputs, rewards_per_func = origin_data
+            self._last_total_reward_metadata = origin_reward_metadata
 
         return inputs, rewards_per_func
 
@@ -728,6 +983,10 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 group_rewards_std = grouped_rewards.std(dim=1).repeat_interleave(num_generations)
             else:
                 group_rewards_std = torch.zeros_like(rewards)
+            group_ids = [idx // num_generations for idx in range(rewards.shape[0])]
+            feasible_mask = self._structure_group_feasible_mask(rewards, group_ids)
+            if feasible_mask is not None:
+                group_rewards_std = torch.where(feasible_mask, group_rewards_std, torch.zeros_like(group_rewards_std))
             return group_rewards_std
         else:
             prompt_ids = gather_object([inp['prompt_id'] for inp in inputs])
@@ -751,6 +1010,9 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
             rid_to_idx = {rid: idx for idx, rid in enumerate(unique_request_ids)}
             indices_in_unique = torch.tensor([rid_to_idx[r] for r in request_ids], device=device)
             rewards_std = prompt_stds[indices_in_unique]
+            feasible_mask = self._structure_group_feasible_mask(rewards, prompt_ids)
+            if feasible_mask is not None:
+                rewards_std = torch.where(feasible_mask, rewards_std, torch.zeros_like(rewards_std))
 
             return rewards_std
 
@@ -1199,6 +1461,9 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
             per_token_loss1 = coef_1 * advantages.unsqueeze(1)
             per_token_loss2 = coef_2 * advantages.unsqueeze(1)
             per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
+        structure_loss_weight = inputs.get('structure_loss_weight')
+        if structure_loss_weight is not None:
+            per_token_loss = per_token_loss * structure_loss_weight.unsqueeze(1)
         if entropy_mask is not None:
             per_token_loss = per_token_loss * entropy_mask
         if per_token_kl is not None:
@@ -1256,6 +1521,10 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
         if per_token_kl is not None:
             mean_kl = masked_batch_mean(per_token_kl)
             metrics_data['kl'] = self.accelerator.gather_for_metrics(mean_kl).nanmean().item()
+
+        if structure_loss_weight is not None:
+            gathered_structure_loss_weight = self.accelerator.gather_for_metrics(structure_loss_weight)
+            metrics_data['structure_loss_weight'] = gathered_structure_loss_weight.nanmean().item()
 
         # Add rollout correction metrics
         if rollout_correction_metrics:
@@ -1319,6 +1588,9 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
             rollout_metrics = metrics_data['rollout_correction']
             for key, value in rollout_metrics.items():
                 self._metrics[mode][f'rollout_correction/{key}'].append(value)
+
+        if 'structure_loss_weight' in metrics_data:
+            self._metrics[mode]['structure/loss_weight_mean'].append(metrics_data['structure_loss_weight'])
 
         # Update clipping metrics
         if 'clipping' in metrics_data:
@@ -2120,6 +2392,8 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
             'offpolicy_sequence_mask': 'enable' if self.off_policy_sequence_mask_delta is not None else 'disable',
             'rollout_importance_sampling': 'enable' if self.rollout_importance_sampling_mode is not None else 'disable',
             'loss_type': str(self.loss_type),
+            'structure_aware_grpo': 'auto' if self.structure_aware_grpo else 'disable',
+            'structure_gate_threshold': str(self.structure_gate_threshold),
         }
         return config
 
@@ -2161,6 +2435,22 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
 
         # Off-Policy Sequence Masking
         self.off_policy_sequence_mask_delta = args.off_policy_sequence_mask_delta
+
+        # SR-GRPO: structure- and relaxation-aware grouped optimization for materials sequences.
+        # It is enabled automatically when reward functions return component metadata. Existing scalar rewards keep
+        # the original GRPO path, so old training commands continue to work unchanged.
+        structure_mode = os.environ.get('SWIFT_STRUCTURE_AWARE_GRPO', 'auto').lower()
+        self.structure_aware_grpo = structure_mode not in ['0', 'false', 'off', 'disable', 'disabled']
+        self.structure_gate_threshold = float(os.environ.get('SWIFT_STRUCTURE_GATE_THRESHOLD', '0.5'))
+        self.structure_stage_weights = {
+            'validity': float(os.environ.get('SWIFT_STRUCTURE_WEIGHT_VALIDITY', '0.30')),
+            'reconstruction': float(os.environ.get('SWIFT_STRUCTURE_WEIGHT_RECONSTRUCTION', '0.30')),
+            'relaxation': float(os.environ.get('SWIFT_STRUCTURE_WEIGHT_RELAXATION', '0.20')),
+            'property': float(os.environ.get('SWIFT_STRUCTURE_WEIGHT_PROPERTY', '0.20')),
+            'novelty': float(os.environ.get('SWIFT_STRUCTURE_WEIGHT_NOVELTY', '0.10')),
+        }
+        self._last_total_reward_metadata = []
+        self._last_structure_loss_weights = None
 
     def _prepare_chord_dataset(self):
         # CHORD, https://arxiv.org/abs/2508.11408
@@ -2594,7 +2884,8 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
             k: v
             for k, v in inputs.items() if k not in [
                 'logits_to_keep', 'completion_mask', 'ref_per_token_logps', 'advantages', 'old_per_token_logps',
-                'truncated_mask', 'seq_lengths', 'num_items_in_batch', 'rollout_per_token_logps'
+                'truncated_mask', 'seq_lengths', 'num_items_in_batch', 'rollout_per_token_logps',
+                'structure_loss_weight'
             ]
         }
 
