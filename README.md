@@ -8,7 +8,7 @@
 
 </div>
 
-**Title** - Policy-Optimized Language Modelling for End-to-End Metal--Organic Framework Discovery
+**Title** - Structure-Aware Language Models for Closed-Loop Materials Discovery
 
 **Authors** - Hongye Liu, Bingxu Wang, Guibo Luo and Feng Pan
 
