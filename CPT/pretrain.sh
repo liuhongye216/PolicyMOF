@@ -23,8 +23,9 @@ swift pt \
     --learning_rate 1e-5 \
     --lora_rank 8 \
     --lora_alpha 32 \
-    --target_modules all-linear \
+    --target_modules q_proj v_proj \
     --gradient_accumulation_steps 2 \
+    --max_grad_norm 1.0 \
     --packing true \
     --eval_steps 500 \
     --save_steps 500 \

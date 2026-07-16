@@ -254,6 +254,7 @@ simulation/**/*.restart
 simulation/**/*.sa
 simulation/**/*.vol
 simulation/**/*.psd_histo
+tobacco_workdir/
 
 # Temporary scientific data products
 *.xyz

@@ -8,9 +8,9 @@
 
 </div>
 
-**Title** - Structure-Aware Language Models for Closed-Loop Materials Discovery
+**Manuscript** - Structure-Aware Language Models for Closed-Loop Materials Discovery
 
-**Authors** - Hongye Liu, Bingxu Wang, Guibo Luo and Feng Pan
+**Authors** - Hongye Liu, Bingxu Wang, Feng Pan and Guibo Luo
 
 ---
 
@@ -33,7 +33,7 @@
 
 ## Introduction
 
-PolicyMOF is an end-to-end large language model framework for metal-organic framework (MOF) discovery. The framework represents reticular chemistry with MOFid-style sequences and connects property prediction, conditional generation, policy optimization, deterministic CIF reconstruction, and physics-based validation in one workflow. It uses LLaMA-3.1 with LoRA fine-tuning, property-conditioned supervised fine-tuning, and group relative policy optimization (GRPO) with a composite reward for chemical validity, novelty, reconstructability, and adsorption-related property scores.
+PolicyMOF is a closed-loop, end-to-end language-model framework for metal-organic framework (MOF) discovery. The framework represents reticular chemistry with MOFid-derived sequences and connects property prediction, conditional generation, policy optimization, deterministic CIF reconstruction, and physics-based validation in one workflow. It uses Llama 3.1 with LoRA fine-tuning, property-conditioned supervised fine-tuning, and structure-aware group relative policy optimization (SR-GRPO) with a composite reward for chemical validity, novelty, reconstructability, and adsorption-related property scores.
 
 In the current release, CO2 adsorption is used as the representative target property. Generated candidates can be reconstructed into CIF structures and evaluated through UFF4MOF/LAMMPS relaxation, Zeo++ pore analysis, and GCMC adsorption simulation.
 
@@ -45,7 +45,7 @@ The PolicyMOF workflow contains four main stages:
 
 1. **Continuous pre-training (CPT)** on MOF-derived sequence corpora to adapt the base language model to reticular chemistry.
 2. **Supervised fine-tuning (SFT)** for property-conditioned representation learning, regression, classification, and generation.
-3. **GRPO optimization** with a composite reward that evaluates chemical validity, novelty, reconstructability, structural quality, and adsorption performance.
+3. **SR-GRPO optimization** with hierarchical validity, novelty, reconstruction, and target-property signals derived from a ten-component composite reward.
 4. **Simulation validation** through SMILES-to-CIF reconstruction, UFF4MOF/LAMMPS relaxation, Zeo++ pore analysis, and GCMC CO2/N2 adsorption calculations.
 
 The implementation also includes attention-analysis scripts for interpreting chemically meaningful tokens such as metal centers, functional groups, and topology identifiers.
@@ -69,14 +69,34 @@ The full workflow requires Python packages and external scientific software:
 - Zeo++
 - MOFid and TOBACCO-related reconstruction utilities
 
+Access to the gated `meta-llama/Llama-3.1-8B` checkpoint requires accepting Meta's license terms and authenticating with Hugging Face. Install the repository's modified SWIFT implementation before running the training scripts:
+
+```bash
+pip install -e ms-swift-MOF_master
+```
+
 Model paths, dataset paths, and external executable paths should be configured for the local machine before running the training or simulation scripts. Large model checkpoints are not included in this repository and are released separately on Zenodo at `https://doi.org/10.5281/zenodo.20742424`.
+
+The reward plugin reads its reference CSV files from `reward/` by default. For
+real-time CIF reconstruction, prepare a TOBACCO work directory containing the
+required `templates/` and `nodes/` assets, then configure the external paths:
+
+```bash
+export MOF_TOBACCO_WORKDIR=/path/to/tobacco_workdir
+export MOF_ADSORPTION_MODEL=/path/to/co2_regression_checkpoint
+```
+
+Generated `edges/` and `output_cifs/` directories are created inside this work
+directory. Each variable used by the training scripts, including `MODEL_PATH`,
+`DATASET_PATH`, `OUTPUT_DIR`, and `CUDA_VISIBLE_DEVICES`, can also be overridden
+without editing the repository.
 
 ### Example Workflow
 
-Continuous pre-training:
+Continuous pre-training with the domain-specific chemical vocabulary:
 
 ```bash
-bash CPT/pretrain.sh
+bash CPT/train_chemical.sh
 ```
 
 Supervised fine-tuning:
@@ -85,10 +105,10 @@ Supervised fine-tuning:
 bash SFT/shared_backbone/train.sh
 ```
 
-GRPO optimization:
+Structure-aware GRPO optimization:
 
 ```bash
-bash GRPO/train_GRPO_func.sh
+bash GRPO/train_SR_GRPO_func.sh
 ```
 
 Attention visualization:
@@ -120,7 +140,7 @@ The released dataset is available on Zenodo:
 https://doi.org/10.5281/zenodo.19809194
 ```
 
-It includes processed MOF data used by this project, including training/test data and generated output data. Raw structures derived from public databases should be accessed through the original database sources cited in the manuscript.
+It includes processed MOF data used by this project, including training/test data and generated output data. Approximately 180,000 hypothetical compositions were enumerated for synthetic augmentation; after SMILES-level validity and deduplication filtering, approximately 80,000 synthetic sequences were retained, giving a combined fine-tuning corpus of approximately 180,000 sequences. Raw structures derived from public databases should be accessed through the original database sources cited in the manuscript.
 
 Small example files are also included in this repository to document the expected input formats:
 
@@ -140,12 +160,12 @@ This repo contains the following main components:
 
 - `CPT/` - Continuous pre-training scripts and MOF sequence corpus examples.
 - `SFT/` - Supervised fine-tuning scripts for regression, classification, and shared-backbone training.
-- `GRPO/` - GRPO training, inference, and MOF sequence-processing utilities.
+- `GRPO/` - Baseline GRPO and manuscript-aligned SR-GRPO training, inference, and MOF sequence-processing utilities.
 - `reward/` - Composite reward plugin and node/linker reference files for MOF generation.
 - `simulation/` - LAMMPS, Zeo++, and GCMC validation workflow for generated CIF structures.
 - `visualization/` - Attention-analysis scripts for model interpretation.
 - `lora_example/` - Example training curves from LoRA/GRPO runs. The corresponding LoRA/GRPO checkpoint files are not stored on GitHub; they are available from Zenodo at `https://doi.org/10.5281/zenodo.20742424`.
-- `ms-swift-MOF_master/` - Modified ms-swift/SWIFT training framework used for MOF sequence modelling.
+- `ms-swift-MOF_master/` - Modified ms-swift/SWIFT training framework used for MOF sequence modelling; this bundled third-party component retains its Apache-2.0 license.
 
 Large checkpoints, generated CIF collections, and full simulation outputs should be stored outside normal Git history. The released PolicyMOF model checkpoint files are available on Zenodo:
 
@@ -165,8 +185,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 If you use this code or dataset in your work, please cite:
 
-- Hongye Liu, Bingxu Wang, Guibo Luo and Feng Pan. "Policy-Optimized Language Modelling for End-to-End Metal--Organic Framework Discovery."
+- Hongye Liu, Bingxu Wang, Feng Pan and Guibo Luo. "Structure-Aware Language Models for Closed-Loop Materials Discovery."
 
 ## Acknowledgements
 
-This repository builds on open-source scientific and machine-learning tools, including ms-swift/SWIFT, MOFid, TOBACCO, LAMMPS, Zeo++, RDKit, pymatgen, ASE, PyTorch, transformers, and peft.
+This repository builds on open-source scientific and machine-learning tools, including ms-swift/SWIFT, MOFid, TOBACCO, LAMMPS, Zeo++, RDKit, pymatgen, ASE, PyTorch, transformers, and peft. PolicyMOF-specific code is released under the repository's MIT license; bundled ms-swift/SWIFT code remains under Apache-2.0.

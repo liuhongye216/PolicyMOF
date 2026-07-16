@@ -520,8 +520,23 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
         for metadata in reward_metadata:
             flat = self._flatten_reward_metadata(metadata or {})
             for stage, aliases in stage_aliases.items():
+                explicit_values = []
+                for reward_meta in (metadata or {}).values():
+                    if not isinstance(reward_meta, dict):
+                        continue
+                    explicit_stages = reward_meta.get('stages', {})
+                    value = explicit_stages.get(stage) if isinstance(explicit_stages, dict) else None
+                    if isinstance(value, (int, float, bool)):
+                        explicit_values.append(float(value))
+                if explicit_values:
+                    stage_present[stage] = True
+                    stage_values[stage].append(sum(explicit_values) / len(explicit_values))
+                    continue
+
                 values = []
                 for key, value in flat.items():
+                    if key.startswith(('weights.', 'gates.')):
+                        continue
                     key_tail = key.split('.')[-1]
                     if key_tail in aliases or key in aliases:
                         values.append(float(value))

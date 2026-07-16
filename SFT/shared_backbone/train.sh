@@ -25,9 +25,9 @@ swift sft \
     --num_cls_labels 5 \
     --num_reg_labels 1 \
     --dataset "${DATASET_PATH}" \
-    --train_type full \
     --new_special_tokens "${CHEMICAL_TOKENS_FILE}" \
-    --modules_to_save embed_tokens lm_head\
+    --modules_to_save embed_tokens lm_head \
+    --torch_dtype bfloat16 \
     --max_length 768 \
     --num_train_epochs 3 \
     --per_device_train_batch_size 2 \
@@ -41,12 +41,12 @@ swift sft \
     --lora_rank 8 \
     --lora_alpha 32 \
     --lora_dropout 0.1 \
-    --target_modules all-linear \
+    --target_modules q_proj v_proj \
     --eval_steps 1000 \
     --save_steps 1000 \
     --save_total_limit 3 \
     --warmup_ratio 0.1 \
     --weight_decay 0.01 \
-    --max_grad_norm 1.0 \
+    --max_grad_norm 0.5 \
     --dataloader_num_workers 4 \
-    --dataset_num_proc 4 \
+    --dataset_num_proc 4

@@ -2,7 +2,10 @@ from __future__ import print_function
 import sys, os
 # Directory containing the external TOBACCO modules required below.
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-BASE_DIR = os.environ.get("MOF_TOBACCO_BASE_DIR", os.path.join(_REPO_ROOT, "tobacco_workdir"))
+BASE_DIR = os.environ.get(
+	"MOF_TOBACCO_BASE_DIR",
+	os.environ.get("MOF_TOBACCO_WORKDIR", os.path.join(_REPO_ROOT, "tobacco_workdir")),
+)
 sys.path.insert(0, BASE_DIR)
 from ciftemplate2graph import ct2g
 from vertex_edge_assign import vertex_assign, assign_node_vecs2edges

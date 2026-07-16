@@ -24,13 +24,14 @@ swift pt \
     --lora_rank 8 \
     --lora_alpha 32 \
     --lora_dropout 0.05 \
-    --target_modules all-linear \
+    --target_modules q_proj v_proj \
     --torch_dtype bfloat16 \
     --streaming true \
     --per_device_train_batch_size 1 \
     --per_device_eval_batch_size 1 \
     --learning_rate 5e-5 \
     --gradient_accumulation_steps 2 \
+    --max_grad_norm 1.0 \
     --packing true \
     --eval_steps 500 \
     --save_steps 500 \

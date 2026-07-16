@@ -9,19 +9,19 @@ Zeo++, and prepares/runs GCMC adsorption simulations for CO2 and N2.
 
 ```text
 simulation/
-├── data/
-│   ├── cif_candidates/      # Input CIF files generated from MOF sequences
-│   ├── lammps_inputs/       # Generated LAMMPS inputs and relaxed outputs
-│   └── gcmc_inputs/         # Generated GCMC simulation inputs
-├── results/                 # Aggregated relaxation, pore, and adsorption results
-├── 01_prepare_lammps.py     # Convert CIF files to LAMMPS/UFF4MOF inputs
-├── 02_run_lammps.py         # Run geometry optimization jobs
-├── 03_analyze_relaxation.py # Analyze relaxation success and structural changes
-├── 04_run_zeopp.py          # Run Zeo++ pore analysis on CIF files
-├── 05_prepare_gcmc.py       # Prepare GCMC inputs for CO2/N2 adsorption
-├── 06_run_gcmc.py           # Run GCMC simulation jobs
-├── 07_analyze_adsorption.py # Summarize adsorption and selectivity results
-└── lammps_template.in       # LAMMPS input template
+|-- data/
+|   |-- cif_candidates/      # Input CIF files generated from MOF sequences
+|   |-- lammps_inputs/       # Generated LAMMPS inputs and relaxed outputs
+|   `-- gcmc_inputs/         # Generated GCMC simulation inputs
+|-- results/                 # Aggregated relaxation, pore, and adsorption results
+|-- 01_prepare_lammps.py     # Convert CIF files to LAMMPS/UFF4MOF inputs
+|-- 02_run_lammps.py         # Run geometry optimization jobs
+|-- 03_analyze_relaxation.py # Analyze relaxation success and structural changes
+|-- 04_run_zeopp.py          # Run Zeo++ pore analysis on CIF files
+|-- 05_prepare_gcmc.py       # Prepare GCMC inputs for CO2/N2 adsorption
+|-- 06_run_gcmc.py           # Run GCMC simulation jobs
+|-- 07_analyze_adsorption.py # Summarize adsorption and selectivity results
+`-- lammps_template.in       # LAMMPS input template
 ```
 
 ## Requirements

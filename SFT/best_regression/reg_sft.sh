@@ -21,8 +21,9 @@ swift sft \
     --learning_rate 1e-4 \
     --lora_rank 8 \
     --lora_alpha 32 \
-    --target_modules all-linear \
+    --target_modules q_proj v_proj \
     --gradient_accumulation_steps 1 \
+    --max_grad_norm 0.5 \
     --eval_steps 200 \
     --save_steps 200 \
     --save_total_limit 3 \

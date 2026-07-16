@@ -13,34 +13,46 @@ from rdkit.Chem import AllChem
 from swift.plugin import ORM, orms
 import shutil
 from pathlib import Path
+from contextlib import contextmanager
 from rdkit.Chem.rdFingerprintGenerator import GetMorganGenerator
 
-ROOT = Path(os.environ.get(
-    "MOF_PROJECT_ROOT",
-    "/home/liuhongye/material_LLM/material_LLM_experiment/post-pronew"
-))
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+REWARD_DIR = Path(__file__).resolve().parent
+UTILS_ROOT = Path(os.environ.get("MOF_UTILS_ROOT", REPO_ROOT / "GRPO")).expanduser().resolve()
+if str(UTILS_ROOT) not in sys.path:
+    sys.path.insert(0, str(UTILS_ROOT))
 
-edges_dir = Path(os.environ.get(
-    "MOF_TOBACCO_EDGES_DIR",
-    str(ROOT / "tobacco_V3" / "edges")
-))
-output_cifs_dir = Path(os.environ.get(
-    "MOF_TOBACCO_OUTPUT_CIFS_DIR",
-    str(ROOT / "tobacco_V3" / "output_cifs")
-))
+TOBACCO_WORKDIR = Path(
+    os.environ.get("MOF_TOBACCO_WORKDIR", REPO_ROOT / "tobacco_workdir")
+).expanduser().resolve()
+edges_dir = Path(
+    os.environ.get("MOF_TOBACCO_EDGES_DIR", TOBACCO_WORKDIR / "edges")
+).expanduser().resolve()
+output_cifs_dir = Path(
+    os.environ.get("MOF_TOBACCO_OUTPUT_CIFS_DIR", TOBACCO_WORKDIR / "output_cifs")
+).expanduser().resolve()
+os.environ.setdefault("MOF_TOBACCO_WORKDIR", str(TOBACCO_WORKDIR))
+os.environ.setdefault("MOF_TOBACCO_BASE_DIR", str(TOBACCO_WORKDIR))
+os.environ.setdefault("MOF_TOBACCO_EDGES_DIR", str(edges_dir))
+os.environ.setdefault("MOF_TOBACCO_OUTPUT_CIFS_DIR", str(output_cifs_dir))
 
 N2_MODEL_PATH = os.environ.get("MOF_N2_MODEL", "")
 CO2_MODEL_PATH = os.environ.get("MOF_CO2_MODEL", "")
 DEFAULT_ADSORPTION_MODEL = os.environ.get("MOF_ADSORPTION_MODEL", CO2_MODEL_PATH)
 
-# Import project utilities after adding ROOT to sys.path.
-from utils.enhanced_cif_screener import run_evaluate
-from utils.tobacco import run_tobacco_with_edge_folders
-from utils.mof_processing import process_mof_smiles
-
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _tobacco_working_directory():
+    """Run legacy TOBACCO utilities against the configured isolated work directory."""
+    TOBACCO_WORKDIR.mkdir(parents=True, exist_ok=True)
+    previous = Path.cwd()
+    os.chdir(TOBACCO_WORKDIR)
+    try:
+        yield
+    finally:
+        os.chdir(previous)
 
 
 class StructuredReward(float):
@@ -75,15 +87,15 @@ class MOFRewardORM(ORM):
         """
         TOKENS_PATH = os.environ.get(
             "MOF_TOKENS_PATH",
-            "/home/liuhongye/material_LLM/material_LLM_experiment/LLM_input/nodes_linkers/mof_id_tokens.csv"
+            str(REWARD_DIR / "mof_id_tokens.csv")
         )
         MOFID_PATH = os.environ.get(
             "MOF_MOFID_PATH",
-            "/home/liuhongye/material_LLM/material_LLM_experiment/LLM_input/nodes_linkers/mof_id.csv"
+            str(REWARD_DIR / "mof_id.csv")
         )
         NODES_CSV = os.environ.get(
             "MOF_NODES_CSV",
-            "/home/liuhongye/material_LLM/material_LLM_experiment/LLM_input/nodes_linkers/nodes_linkers_fromfolder.csv"
+            str(REWARD_DIR / "nodes_linkers_fromfolder.csv")
         )
 
         # 常见金属原子符号集合
@@ -941,6 +953,11 @@ class MOFRewardORM(ORM):
                 print("MOFReward: cif_generation_score: invalid '.' count in SMILES part")
                 return 0.0
 
+            # Import optional reconstruction dependencies only when this score is used.
+            from utils.enhanced_cif_screener import run_evaluate
+            from utils.mof_processing import process_mof_smiles
+            from utils.tobacco import run_tobacco_with_edge_folders
+
             # 1) 先做 MOF 片段 → CIF 预处理
             prep_ret = process_mof_smiles(pred)
             if prep_ret == 0:
@@ -956,7 +973,8 @@ class MOFRewardORM(ORM):
                 print(f"MOFReward: process_mof_smiles returned {prep_ret}")
 
             # 2) 跑 TOBACCO：根据 edges 生成结构
-            tobacco_ret = run_tobacco_with_edge_folders(CHARGES=True)
+            with _tobacco_working_directory():
+                tobacco_ret = run_tobacco_with_edge_folders(CHARGES=True)
             if tobacco_ret == 0:
                 for root_dir in [edges_dir, output_cifs_dir]:
                     if root_dir.exists() and root_dir.is_dir():

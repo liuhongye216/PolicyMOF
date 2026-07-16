@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL_PATH="${MODEL_PATH:-outputs/sft_generation}"
-ADAPTER_PATH="${ADAPTER_PATH:-outputs/grpo/checkpoint-last}"
+MODEL_PATH="${MODEL_PATH:-outputs/shared_backbone}"
+ADAPTER_PATH="${ADAPTER_PATH:-outputs/sr_grpo/checkpoint-last}"
 VAL_DATASET="${VAL_DATASET:-GRPO/test/gene_mix_test.jsonl}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
